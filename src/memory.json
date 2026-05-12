@@ -1,1 +1,12 @@
-[]
+[
+  "Implement case-insensitive comparison correctly",
+  "Ensure dictionary keys are unique",
+  "Handle non-hashable elements",
+  "Handle duplicate modes",
+  "Improve efficiency of the solution",
+  "Handle lists with non-unique elements",
+  "Follow PEP 8 style guide",
+  "Include error handling",
+  "Include documentation",
+  "Follow the DRY principle"
+]

@@ -163,8 +163,12 @@ class Manager:
             return "end"
         return "end"
 
-    def orchestrate(self, task_id, task_prompt, max_iterations=5):
-        print(f"\n========== Starting Task {task_id} ==========")
+    def orchestrate(self, task_id, task_prompt, max_iterations=5, ablation_mode=None):
+        print(f"\n========== Starting Task {task_id} (Ablation: {ablation_mode}) ==========")
+        
+        # If in no-memory ablation, clear memory for this run
+        if ablation_mode in ["no-memory", "single-agent"]:
+             with open(self.memory_file, 'w') as f: json.dump([], f)
         
         iteration = 0
         cd_count = 0 
@@ -186,7 +190,14 @@ class Manager:
                 print(f"\n--- [Iteration {iteration}] ---")
                 
                 print(">> Manager dynamically routing to Worker...")
-                state["solution"] = self.worker.solve(task_prompt, self.get_memory_context())
+                
+                # Single-agent ablation only gets 1 iteration max
+                if ablation_mode == "single-agent" and iteration > 1:
+                    state["status"] = "end"
+                    break
+                    
+                memory_ctx = self.get_memory_context() if ablation_mode not in ["no-memory", "single-agent"] else "No prior memory."
+                state["solution"] = self.worker.solve(task_prompt, memory_ctx)
                 cd_count += 1
                 solution_lengths.append(len(state["solution"]))
                 
@@ -203,7 +214,10 @@ class Manager:
                 
             elif next_node == "security":
                 print(">> Manager dynamically routing to SecurityFilter (Evaluation Gate)...")
-                is_safe, sec_feedback = self.security.check_safety(state["solution"])
+                if ablation_mode == "no-security":
+                    is_safe, sec_feedback = True, "Safety bypassed for ablation."
+                else:
+                    is_safe, sec_feedback = self.security.check_safety(state["solution"])
                 cd_count += 1
                 if is_safe:
                     trajectory[-1]["security"] = "PASS"
@@ -230,9 +244,12 @@ class Manager:
                     else:
                         print("❌ Critic failed. Memory updated.")
                         trajectory[-1]["critic"] = "FAIL"
-                        self.update_memory(task_prompt, feedback)
+                        if ablation_mode not in ["no-memory", "single-agent"]:
+                            self.update_memory(task_prompt, feedback)
                         cd_count += 1
                         state["status"] = "needs_rework"
+                        if ablation_mode == "single-agent":
+                            state["status"] = "end" # Single agent doesn't get to rework
                 except ConnectionError as e:
                     print(f"[!] {str(e)} -> Simulating FT by retrying...")
                     failures_tolerated += 1
