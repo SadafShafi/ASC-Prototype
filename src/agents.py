@@ -171,12 +171,13 @@ class Manager:
              with open(self.memory_file, 'w') as f: json.dump([], f)
         
         iteration = 0
-        cd_count = 0 
+        cd_count = 0
         strategies_used = set()
         valid_goal_steps = 0
         failures_tolerated = 0
-        solution_lengths = []
-        
+        action_counts = []  # A_T: logged-action count per iteration, for BV = sigma^2(A_T)
+        actions_this_iteration = 0
+
         state = {"status": "start", "solution": None, "feedback": None}
         passed = False
         trajectory = []
@@ -185,22 +186,27 @@ class Manager:
             next_node = self.determine_next_node(state)
             
             if next_node == "worker":
+                # Flush the previous iteration's action tally before starting a new one
+                if actions_this_iteration > 0:
+                    action_counts.append(actions_this_iteration)
+                actions_this_iteration = 0
+
                 iteration += 1
                 if iteration > max_iterations: break
                 print(f"\n--- [Iteration {iteration}] ---")
-                
+
                 print(">> Manager dynamically routing to Worker...")
-                
+
                 # Single-agent ablation only gets 1 iteration max
                 if ablation_mode == "single-agent" and iteration > 1:
                     state["status"] = "end"
                     break
-                    
+
                 memory_ctx = self.get_memory_context() if ablation_mode not in ["no-memory", "single-agent"] else "No prior memory."
                 state["solution"] = self.worker.solve(task_prompt, memory_ctx)
                 cd_count += 1
-                solution_lengths.append(len(state["solution"]))
-                
+                actions_this_iteration += 1  # PROPOSE_SOLUTION
+
                 if "STRATEGY:" in state["solution"] and "SOLUTION:" in state["solution"]:
                     valid_goal_steps += 1
                     
@@ -219,6 +225,7 @@ class Manager:
                 else:
                     is_safe, sec_feedback = self.security.check_safety(state["solution"])
                 cd_count += 1
+                actions_this_iteration += 1  # SAFETY_PASS / SAFETY_VIOLATION
                 if is_safe:
                     trajectory[-1]["security"] = "PASS"
                     state["status"] = "security_passed"
@@ -234,9 +241,10 @@ class Manager:
                 try:
                     evaluation = self.critic.evaluate(task_prompt, state["solution"])
                     cd_count += 1
+                    actions_this_iteration += 1  # EVALUATE
                     feedback = evaluation.get("feedback", "No feedback.")
                     trajectory[-1]["feedback"] = feedback
-                    
+
                     if evaluation.get("passed", False):
                         trajectory[-1]["critic"] = "PASS"
                         state["status"] = "end"
@@ -246,6 +254,7 @@ class Manager:
                         trajectory[-1]["critic"] = "FAIL"
                         if ablation_mode not in ["no-memory", "single-agent"]:
                             self.update_memory(task_prompt, feedback)
+                            actions_this_iteration += 1  # CONSOLIDATE_MEMORY
                         cd_count += 1
                         state["status"] = "needs_rework"
                         if ablation_mode == "single-agent":
@@ -253,10 +262,15 @@ class Manager:
                 except ConnectionError as e:
                     print(f"[!] {str(e)} -> Simulating FT by retrying...")
                     failures_tolerated += 1
+                    actions_this_iteration += 1  # CRITIC_OFFLINE
                     
             elif next_node == "end":
                 break
-                
+
+        # Flush the final iteration's action tally
+        if actions_this_iteration > 0:
+            action_counts.append(actions_this_iteration)
+
         # Metric Calculations...
 
         recovered = (iteration > 1 and passed)
@@ -280,11 +294,10 @@ class Manager:
             rspi = entropy_sum / len(agent_actions) if agent_actions else 0.0
         except Exception: pass
             
-        # Calculate BV
-        if len(solution_lengths) > 1:
-            mean = sum(solution_lengths) / len(solution_lengths)
-            variance = sum((x - mean) ** 2 for x in solution_lengths) / len(solution_lengths)
-            bv = math.sqrt(variance)
+        # Calculate BV = sigma^2(A_T): population variance of per-iteration action counts (eq. 7)
+        if len(action_counts) > 1:
+            mean = sum(action_counts) / len(action_counts)
+            bv = sum((x - mean) ** 2 for x in action_counts) / len(action_counts)
             
         print(f"{'✅ Task completed successfully!' if passed else '❌ Task aborted.'}")
         return {
